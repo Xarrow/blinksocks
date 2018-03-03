@@ -25,45 +25,40 @@ function getRandomInt(min, max) {
   return Math.floor(crypto.randomBytes(1)[0] / 0xff * (max - min)) + min;
 }
 
-module.exports = function init({isMinimal, isOverwrite}) {
+module.exports = function init({ isMinimal, isOverwrite, isDryRun = false }) {
   const key = random('abcdefghjkmnpqrstuvwxyz23456789!@#$%^&*()_+<>?:|{}-=[];,./ABCDEFGHJKLMNPQRSTUVWXYZ', 16);
   const port = getRandomInt(1024, 65535);
   const timeout = getRandomInt(200, 1000);
 
   const clientJson = {
     'service': 'socks5://127.0.0.1:1080',
-    'servers': [
-      {
-        'enabled': true,
-        'service': `tcp://127.0.0.1:${port}`,
-        'key': key,
-        'presets': [
-          {'name': 'ss-base'},
-          {'name': 'obfs-random-padding'},
-          {'name': 'ss-stream-cipher', 'params': {'method': 'aes-128-ctr'}}
-        ],
-        'tls_cert': 'cert.pem',
-        'mux': false,
-        'mux_concurrency': 10
-      }
-    ],
+    'server': {
+      'service': `tcp://127.0.0.1:${port}`,
+      'key': key,
+      'presets': [
+        { 'name': 'ss-base' },
+        { 'name': 'obfs-random-padding' },
+        { 'name': 'ss-stream-cipher', 'params': { 'method': 'aes-128-ctr' } }
+      ],
+      'tls_cert': 'cert.pem',
+      'mux': false,
+      'mux_concurrency': 10
+    },
     'dns': [],
     'dns_expire': 3600,
     'timeout': timeout,
-    'workers': 0,
     'log_path': 'bs-client.log',
     'log_level': 'info',
     'log_max_days': 30
   };
 
   if (isMinimal) {
-    delete clientJson.servers[0].tls_cert;
-    delete clientJson.servers[0].mux;
-    delete clientJson.servers[0].mux_concurrency;
+    delete clientJson.server.tls_cert;
+    delete clientJson.server.mux;
+    delete clientJson.server.mux_concurrency;
     delete clientJson.dns;
     delete clientJson.dns_expire;
     delete clientJson.timeout;
-    delete clientJson.workers;
     delete clientJson.log_path;
     delete clientJson.log_level;
     delete clientJson.log_max_days;
@@ -73,18 +68,19 @@ module.exports = function init({isMinimal, isOverwrite}) {
     'service': `tcp://0.0.0.0:${port}`,
     'key': key,
     'presets': [
-      {'name': 'ss-base'},
-      {'name': 'obfs-random-padding'},
-      {'name': 'ss-stream-cipher', 'params': {'method': 'aes-128-ctr'}}
+      { 'name': 'ss-base' },
+      { 'name': 'obfs-random-padding' },
+      { 'name': 'ss-stream-cipher', 'params': { 'method': 'aes-128-ctr' } }
     ],
     'tls_key': 'key.pem',
     'tls_cert': 'cert.pem',
+    'acl': false,
+    'acl_conf': 'acl.txt',
     'mux': false,
     'dns': [],
     'dns_expire': 3600,
     'timeout': timeout,
     'redirect': '',
-    'workers': 0,
     'log_path': 'bs-server.log',
     'log_level': 'info',
     'log_max_days': 30
@@ -93,15 +89,20 @@ module.exports = function init({isMinimal, isOverwrite}) {
   if (isMinimal) {
     delete serverJson.tls_key;
     delete serverJson.tls_cert;
+    delete serverJson.acl;
+    delete serverJson.acl_conf;
     delete serverJson.mux;
     delete serverJson.dns;
     delete serverJson.dns_expire;
     delete serverJson.timeout;
     delete serverJson.redirect;
-    delete serverJson.workers;
     delete serverJson.log_path;
     delete serverJson.log_level;
     delete serverJson.log_max_days;
+  }
+
+  if (isDryRun) {
+    return { clientJson, serverJson };
   }
 
   const clientJsonPath = 'blinksocks.client.json';

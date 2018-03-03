@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import { IPreset } from './defs';
 import {
   numberToBuffer,
   getCurrentTimestampInt,
@@ -6,7 +7,6 @@ import {
   getRandomChunks,
   AdvancedBuffer
 } from '../utils';
-import {IPreset} from './defs';
 
 const TLS_STAGE_HELLO = 1;
 const TLS_STAGE_CHANGE_CIPHER_SPEC = 2;
@@ -78,7 +78,7 @@ export default class ObfsTls12TicketPreset extends IPreset {
 
   _adBuf = null;
 
-  static checkParams({sni}) {
+  static onCheckParams({ sni }) {
     if (typeof sni === 'undefined') {
       throw Error('\'sni\' must be set');
     }
@@ -90,13 +90,10 @@ export default class ObfsTls12TicketPreset extends IPreset {
     }
   }
 
-  constructor({sni}) {
-    super();
-    this.onReceiving = this.onReceiving.bind(this);
-    this.onChunkReceived = this.onChunkReceived.bind(this);
+  onInit({ sni }) {
     this._sni = Array.isArray(sni) ? sni : [sni];
-    this._adBuf = new AdvancedBuffer({getPacketLength: this.onReceiving});
-    this._adBuf.on('data', this.onChunkReceived);
+    this._adBuf = new AdvancedBuffer({ getPacketLength: this.onReceiving.bind(this) });
+    this._adBuf.on('data', this.onChunkReceived.bind(this));
   }
 
   onDestroy() {
@@ -111,7 +108,7 @@ export default class ObfsTls12TicketPreset extends IPreset {
     return Buffer.from(this._sni[index]);
   }
 
-  clientOut({buffer, next}) {
+  clientOut({ buffer, next }) {
     if (this._stage === TLS_STAGE_HELLO) {
       this._stage = TLS_STAGE_CHANGE_CIPHER_SPEC;
       this._staging = buffer;
@@ -208,7 +205,7 @@ export default class ObfsTls12TicketPreset extends IPreset {
     }
   }
 
-  serverIn({buffer, next, fail}) {
+  serverIn({ buffer, next, fail }) {
     if (this._stage === TLS_STAGE_HELLO) {
       this._stage = TLS_STAGE_CHANGE_CIPHER_SPEC;
 
@@ -317,17 +314,17 @@ export default class ObfsTls12TicketPreset extends IPreset {
       _buffer = buffer.slice(43);
     }
 
-    this._adBuf.put(_buffer, {next, fail});
+    this._adBuf.put(_buffer, { next, fail });
   }
 
-  serverOut({buffer}) {
+  serverOut({ buffer }) {
     // Send Application Data
     const chunks = getRandomChunks(buffer, MIN_AD_PAYLOAD_LEN, MAX_AD_PAYLOAD_LEN)
       .map((chunk) => ApplicationData(chunk));
     return Buffer.concat(chunks);
   }
 
-  clientIn({buffer, next, fail}) {
+  clientIn({ buffer, next, fail }) {
     if (this._stage === TLS_STAGE_CHANGE_CIPHER_SPEC) {
       this._stage = TLS_STAGE_APPLICATION_DATA;
       // TODO: 1. Check Server Hello
@@ -351,7 +348,7 @@ export default class ObfsTls12TicketPreset extends IPreset {
       this._staging = null;
       return next(Buffer.from([...change_cipher_spec, ...finished, ...Buffer.concat(chunks)]), true);
     }
-    this._adBuf.put(buffer, {next, fail});
+    this._adBuf.put(buffer, { next, fail });
   }
 
   onReceiving(buffer) {
@@ -362,7 +359,7 @@ export default class ObfsTls12TicketPreset extends IPreset {
     return 5 + buffer.readUInt16BE(3);
   }
 
-  onChunkReceived(chunk, {next}) {
+  onChunkReceived(chunk, { next }) {
     // Drop TLS Application Data header
     next(chunk.slice(5));
   }

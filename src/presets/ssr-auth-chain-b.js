@@ -1,4 +1,4 @@
-import SsrAuthChainPreset, {xorshift128plus} from './ssr-auth-chain';
+import SsrAuthChainPreset, { xorshift128plus } from './ssr-auth-chain';
 
 /**
  * Calculates the index of the Array where item X should be placed, assuming the Array is sorted.
@@ -41,8 +41,8 @@ export default class SsrAuthChainBPreset extends SsrAuthChainPreset {
 
   _data_size_list2 = [];
 
-  constructor(params) {
-    super(params);
+  constructor(props) {
+    super(props);
     this._salt = 'auth_chain_b';
   }
 

@@ -1,13 +1,13 @@
-import {Inbound, Outbound} from './defs';
-import {CONNECT_TO_REMOTE, CONNECTED_TO_REMOTE, PRESET_FAILED} from '../presets/defs';
-import {logger} from '../utils';
+import { Inbound, Outbound } from './defs';
+import { logger } from '../utils';
+import { CONNECT_TO_REMOTE, CONNECTED_TO_REMOTE, PRESET_FAILED } from '../presets/actions';
 
 export class MuxInbound extends Inbound {
 
   constructor(props) {
     super(props);
     this.onDrain = this.onDrain.bind(this);
-    if (__IS_SERVER__) {
+    if (this._config.is_server) {
       const inbound = this.ctx.muxRelay.getInbound();
       inbound.on('drain', this.onDrain);
     } else {
@@ -20,7 +20,7 @@ export class MuxInbound extends Inbound {
   }
 
   get bufferSize() {
-    if (__IS_CLIENT__) {
+    if (this._config.is_client) {
       const totalBufferSize = 0;
       // const subRelays = this.ctx.thisRelay.getSubRelays();
       // if (subRelays) {
@@ -60,7 +60,7 @@ export class MuxInbound extends Inbound {
   }
 
   async onPresetFailed(action) {
-    const {name, message} = action.payload;
+    const { name, message } = action.payload;
     logger.error(`[${this.name}] [${this.remote}] preset "${name}" fail to process: ${message}`);
     // TODO: maybe have more things to do rather than keep silent
   }
@@ -70,26 +70,20 @@ export class MuxInbound extends Inbound {
   }
 
   write(buffer) {
-    if (__IS_SERVER__) {
-      const {muxRelay, cid} = this.ctx;
-      muxRelay.encode(buffer, {cid});
+    if (this._config.is_server) {
+      const { muxRelay, cid } = this.ctx;
+      muxRelay.encode(buffer, { cid });
     }
-  }
-
-  end() {
-    // TODO: handle half close correctly in mux protocol
-    this.close();
   }
 
   close() {
     const doClose = () => {
-      if (__IS_SERVER__) {
-        const {muxRelay, cid} = this.ctx;
+      if (this._config.is_server) {
+        const { muxRelay } = this.ctx;
         const inbound = muxRelay.getInbound();
         if (inbound) {
           inbound.removeListener('drain', this.onDrain);
         }
-        muxRelay.destroySubRelay(cid);
       }
       if (!this._destroyed) {
         this._destroyed = true;
@@ -112,7 +106,7 @@ export class MuxOutbound extends Outbound {
   constructor(props) {
     super(props);
     this.onDrain = this.onDrain.bind(this);
-    if (__IS_CLIENT__) {
+    if (this._config.is_client) {
       const outbound = this.ctx.muxRelay.getOutbound();
       outbound.on('drain', this.onDrain);
     } else {
@@ -121,7 +115,7 @@ export class MuxOutbound extends Outbound {
   }
 
   get bufferSize() {
-    if (__IS_CLIENT__) {
+    if (this._config.is_client) {
       const outbound = this.ctx.muxRelay.getOutbound();
       if (outbound) {
         return outbound.bufferSize;
@@ -148,31 +142,25 @@ export class MuxOutbound extends Outbound {
   }
 
   write(buffer) {
-    if (__IS_CLIENT__) {
-      const {muxRelay, proxyRequest, cid} = this.ctx;
+    if (this._config.is_client) {
+      const { muxRelay, proxyRequest, cid } = this.ctx;
       if (this._isFirstFrame) {
         this._isFirstFrame = false;
-        muxRelay.encode(buffer, {cid, ...proxyRequest});
+        muxRelay.encode(buffer, { cid, ...proxyRequest });
       } else {
-        muxRelay.encode(buffer, {cid});
+        muxRelay.encode(buffer, { cid });
       }
     }
   }
 
-  end() {
-    // TODO: handle half close correctly in mux protocol
-    this.close();
-  }
-
   close() {
     const doClose = () => {
-      if (__IS_CLIENT__) {
-        const {muxRelay, cid} = this.ctx;
+      if (this._config.is_client) {
+        const { muxRelay } = this.ctx;
         const outbound = muxRelay.getOutbound();
         if (outbound) {
           outbound.removeListener('drain', this.onDrain);
         }
-        muxRelay.destroySubRelay(cid);
       }
       if (!this._destroyed) {
         this._destroyed = true;

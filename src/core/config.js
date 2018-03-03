@@ -5,11 +5,13 @@ import os from 'os';
 import net from 'net';
 import url from 'url';
 import qs from 'qs';
+import chalk from 'chalk';
 import winston from 'winston';
 import isPlainObject from 'lodash.isplainobject';
-import {getPresetClassByName, IPresetAddressing} from '../presets';
-import {isValidHostname, isValidPort, logger} from '../utils';
-import {DNS_DEFAULT_EXPIRE} from './dns-cache';
+import { ACL } from './acl';
+import { getPresetClassByName } from '../presets';
+import { IPresetAddressing } from '../presets/defs';
+import { DNSCache, isValidHostname, isValidPort, logger, DNS_DEFAULT_EXPIRE } from '../utils';
 
 function loadFileSync(file) {
   return fs.readFileSync(path.resolve(process.cwd(), file));
@@ -17,128 +19,222 @@ function loadFileSync(file) {
 
 export class Config {
 
-  static init(json) {
-    const {protocol, hostname, port, query} = url.parse(json.service);
-    global.__LOCAL_PROTOCOL__ = protocol.slice(0, -1);
-    global.__LOCAL_HOST__ = hostname;
-    global.__LOCAL_PORT__ = +port;
+  local_protocol = null;
+  local_host = null;
+  local_port = null;
 
+  forward_host = null;
+  forward_port = null;
+
+  server = null;
+  is_client = null;
+  is_server = null;
+
+  timeout = null;
+  redirect = null;
+
+  dns_expire = null;
+  dns = null;
+
+  transport = null;
+  server_host = null;
+  server_port = null;
+  tls_cert = null;
+  tls_key = null;
+  key = null;
+
+  acl = false;
+  acl_conf = '';
+  acl_rules = [];
+  acl_tries = {};
+
+  presets = null;
+  udp_presets = null;
+
+  mux = null;
+  mux_concurrency = null;
+
+  log_path = null;
+  log_level = null;
+  log_max_days = null;
+
+  // an isolate space where presets can store something in.
+  // store[i] is for presets[i]
+  stores = [];
+
+  constructor(json) {
+    const { protocol, hostname, port, query } = url.parse(json.service);
+    this.local_protocol = protocol.slice(0, -1);
+    this.local_host = hostname;
+    this.local_port = +port;
+
+    let server;
+    // TODO(remove in next version): make backwards compatibility to "json.servers"
     if (json.servers !== undefined) {
-      global.__SERVERS__ = json.servers.filter((server) => !!server.enabled);
-      global.__IS_CLIENT__ = true;
-      global.__IS_SERVER__ = false;
+      server = json.servers.find((server) => !!server.enabled);
+      console.log(
+        chalk.bgYellowBright('WARN'),
+        '"servers" will be deprecated in the next version,' +
+        ' please configure only one server in "server: {...}",' +
+        ' for migration guide please refer to CHANGELOG.md.'
+      );
     } else {
-      global.__IS_CLIENT__ = false;
-      global.__IS_SERVER__ = true;
+      server = json.server;
     }
 
-    Config.initLogger(json);
-
-    if (__IS_SERVER__) {
-      Config.initServer(json);
+    if (server) {
+      this.is_client = true;
+      this.is_server = false;
+    } else {
+      this.is_client = false;
+      this.is_server = true;
     }
 
-    if (__IS_CLIENT__ && __LOCAL_PROTOCOL__ === 'tcp') {
-      const {forward} = qs.parse(query);
-      const {hostname, port} = url.parse('tcp://' + forward);
-      global.__FORWARD_HOST__ = hostname;
-      global.__FORWARD_PORT__ = +port;
+    this._initLogger(json);
+
+    if (this.is_server) {
+      this._initServer(json);
+    } else {
+      this._initServer(server);
     }
 
-    global.__TIMEOUT__ = (json.timeout !== undefined) ? json.timeout * 1e3 : 600 * 1e3;
-    global.__REDIRECT__ = (json.redirect !== '') ? json.redirect : null;
-    global.__WORKERS__ = (json.workers !== undefined) ? json.workers : 0;
-    global.__DNS_EXPIRE__ = (json.dns_expire !== undefined) ? json.dns_expire * 1e3 : DNS_DEFAULT_EXPIRE;
+    if (this.is_client && this.local_protocol === 'tcp') {
+      const { forward } = qs.parse(query);
+      const { hostname, port } = url.parse('tcp://' + forward);
+      this.forward_host = hostname;
+      this.forward_port = +port;
+    }
+
+    // common
+
+    this.timeout = (json.timeout !== undefined) ? json.timeout * 1e3 : 600 * 1e3;
+    this.dns_expire = (json.dns_expire !== undefined) ? json.dns_expire * 1e3 : DNS_DEFAULT_EXPIRE;
 
     // dns
     if (json.dns !== undefined && json.dns.length > 0) {
-      global.__DNS__ = json.dns;
+      this.dns = json.dns;
       dns.setServers(json.dns);
     }
+
+    // dns-cache
+    DNSCache.init(this.dns_expire);
   }
 
-  static initServer(server) {
+  _initServer(server) {
     // service
-    const {protocol, hostname, port} = url.parse(server.service);
-    global.__TRANSPORT__ = protocol.slice(0, -1);
-    global.__SERVER_HOST__ = hostname;
-    global.__SERVER_PORT__ = +port;
+    const { protocol, hostname, port } = url.parse(server.service);
+    this.transport = protocol.slice(0, -1);
+    this.server_host = hostname;
+    this.server_port = +port;
 
     // preload tls_cert or tls_key
-    if (__TRANSPORT__ === 'tls') {
+    if (this.transport === 'tls') {
       logger.info(`[config] loading ${server.tls_cert}`);
-      global.__TLS_CERT__ = loadFileSync(server.tls_cert);
-      if (__IS_SERVER__) {
+      this.tls_cert = loadFileSync(server.tls_cert);
+      if (this.is_server) {
         logger.info(`[config] loading ${server.tls_key}`);
-        global.__TLS_KEY__ = loadFileSync(server.tls_key);
+        this.tls_key = loadFileSync(server.tls_key);
       }
     }
 
-    global.__KEY__ = server.key;
-    global.__PRESETS__ = server.presets;
-    global.__UDP_PRESETS__ = server.presets;
+    this.key = server.key;
+    this.presets = server.presets;
+    this.udp_presets = server.presets;
+
+    // acl
+    if (server.acl !== undefined) {
+      this.acl = server.acl;
+    }
+
+    // acl_conf, acl_rules
+    if (server.acl_conf !== undefined && server.acl) {
+      this.acl_conf = server.acl_conf;
+      ACL.loadRules(path.resolve(process.cwd(), server.acl_conf))
+        .then((rules) => this.acl_rules = rules);
+    }
+
+    // redirect
+    if (server.redirect !== undefined) {
+      this.redirect = server.redirect;
+    }
 
     // mux
-    global.__MUX__ = !!server.mux;
-    if (__IS_CLIENT__) {
-      global.__MUX_CONCURRENCY__ = server.mux_concurrency || 10;
+    this.mux = !!server.mux;
+    if (this.is_client) {
+      this.mux_concurrency = server.mux_concurrency || 10;
     }
 
     // remove unnecessary presets
-    if (__MUX__) {
-      global.__PRESETS__ = __PRESETS__.filter(
-        ({name}) => !IPresetAddressing.isPrototypeOf(getPresetClassByName(name))
+    if (this.mux) {
+      this.presets = this.presets.filter(
+        ({ name }) => !IPresetAddressing.isPrototypeOf(getPresetClassByName(name))
       );
     }
 
-    // pre-init presets
-    for (const {name, params = {}} of server.presets) {
+    // pre-cache presets
+    this.stores = (new Array(this.presets.length)).fill({});
+    for (let i = 0; i < server.presets.length; i++) {
+      const { name, params = {} } = server.presets[i];
       const clazz = getPresetClassByName(name);
-      clazz.checked = false;
-      clazz.checkParams(params);
-      clazz.initialized = false;
-      clazz.onInit(params);
+      const data = clazz.onCache(params, this.stores[i]);
+      if (data instanceof Promise) {
+        data.then((d) => this.stores[i] = d);
+      } else if (typeof data !== 'undefined') {
+        this.stores[i] = data;
+      }
     }
   }
 
-  static initLogger(json) {
-    // log_path & log_level
-    const absolutePath = path.resolve(process.cwd(), json.log_path || '.');
+  _initLogger(json) {
+    // log_path, log_level, log_max_days
+    this.log_path = Config.getLogFilePath(json.log_path);
+    this.log_level = (json.log_level !== undefined) ? json.log_level : 'info';
+    this.log_max_days = (json.log_max_days !== undefined) ? json.log_max_days : 0;
+
+    const level = process.env.NODE_ENV === 'test' ? 'error' : this.log_level;
+    const transports = [
+      new (winston.transports.Console)({
+        colorize: true,
+        prettyPrint: true,
+      }),
+    ];
+
+    if (process.env.NODE_ENV !== 'test') {
+      transports.push(
+        new (require('winston-daily-rotate-file'))({
+          level: level,
+          // NOTE: There is bug in winston-daily-rotate-file that
+          // we cannot use logger.stream(...).on('log', (log) => {...});
+          // to stream logs back from this transport when set
+          // "json: false" which output non-json lines in logs.
+          json: false,
+          eol: os.EOL,
+          filename: this.log_path,
+          maxDays: this.log_max_days,
+        }),
+      );
+    }
+
+    logger.configure({ level, transports });
+  }
+
+  static getLogFilePath(log_path) {
+    const absolutePath = path.resolve(process.cwd(), log_path || '.');
     let isFile = false;
     if (fs.existsSync(absolutePath)) {
       isFile = fs.statSync(absolutePath).isFile();
     } else if (path.extname(absolutePath) !== '') {
       isFile = true;
     }
-
-    // log_path, log_level, log_max_days
-    global.__LOG_PATH__ = isFile ? absolutePath : path.join(absolutePath, `bs-${__IS_CLIENT__ ? 'client' : 'server'}.log`);
-    global.__LOG_LEVEL__ = (json.log_level !== undefined) ? json.log_level : 'info';
-    global.__LOG_MAX_DAYS__ = (json.log_max_days !== undefined) ? json.log_max_days : 0;
-
-    logger.configure({
-      level: __LOG_LEVEL__,
-      transports: [
-        new (winston.transports.Console)({
-          colorize: true,
-          prettyPrint: true
-        }),
-        new (require('winston-daily-rotate-file'))({
-          json: false,
-          eol: os.EOL,
-          filename: __LOG_PATH__,
-          level: __LOG_LEVEL__,
-          maxDays: __LOG_MAX_DAYS__
-        })
-      ]
-    });
+    return isFile ? absolutePath : path.join(absolutePath, `bs-${this.is_client ? 'client' : 'server'}.log`);
   }
 
   static test(json) {
     if (!isPlainObject(json)) {
       throw Error('invalid configuration file');
     }
-    const is_client = !!json.servers;
+    // TODO(remove in next version): json.servers
+    const is_client = !!json.servers || !!json.server;
     if (is_client) {
       Config.testOnClient(json);
     } else {
@@ -152,7 +248,7 @@ export class Config {
       throw Error('"service" must be provided as "<protocol>://<host>:<port>[?params]"');
     }
 
-    const {protocol: _protocol, hostname, port, query} = url.parse(json.service);
+    const { protocol: _protocol, hostname, port, query } = url.parse(json.service);
 
     // service.protocol
     if (typeof _protocol !== 'string') {
@@ -180,14 +276,14 @@ export class Config {
 
     // service.query
     if (protocol === 'tcp') {
-      const {forward} = qs.parse(query);
+      const { forward } = qs.parse(query);
 
       // ?forward
       if (!forward) {
         throw Error('require "?forward=<host>:<port>" parameter in service when using "tcp" on client side');
       }
 
-      const {hostname, port} = url.parse('tcp://' + forward);
+      const { hostname, port } = url.parse('tcp://' + forward);
       if (!isValidHostname(hostname)) {
         throw Error('service.?forward.host is invalid');
       }
@@ -196,15 +292,21 @@ export class Config {
       }
     }
 
-    // servers
-    if (!Array.isArray(json.servers)) {
-      throw Error('"servers" must be provided as an array');
+    // server
+    let server;
+    // TODO(remove in next version): make backwards compatibility to "json.servers"
+    if (json.servers) {
+      if (!Array.isArray(json.servers)) {
+        throw Error('"servers" must be provided as an array');
+      }
+      server = json.servers.find((server) => !!server.enabled);
+      if (!server) {
+        throw Error('"servers" must have at least one enabled item');
+      }
+    } else {
+      server = json.server;
     }
-    const servers = json.servers.filter((server) => !!server.enabled);
-    if (servers.length < 1) {
-      throw Error('"servers" must have at least one enabled item');
-    }
-    servers.forEach((server) => Config._testServer(server, true));
+    Config._testServer(server, true);
 
     // common
     Config._testCommon(json);
@@ -242,7 +344,7 @@ export class Config {
       throw Error('"service" must be provided as "<protocol>://<host>:<port>[?params]"');
     }
 
-    const {protocol: _protocol, hostname, port} = url.parse(server.service);
+    const { protocol: _protocol, hostname, port } = url.parse(server.service);
 
     // service.protocol
     if (typeof _protocol !== 'string') {
@@ -284,6 +386,22 @@ export class Config {
       throw Error('"server.key" must be a non-empty string');
     }
 
+    // acl, acl_conf
+    if (!from_client && server.acl !== undefined) {
+      if (typeof server.acl !== 'boolean') {
+        throw Error('"server.acl" must be true or false');
+      }
+      if (server.acl) {
+        if (typeof server.acl_conf !== 'string' || server.acl_conf === '') {
+          throw Error('"server.acl_conf" must be a non-empty string');
+        }
+        const conf = path.resolve(process.cwd(), server.acl_conf);
+        if (!fs.existsSync(conf)) {
+          throw Error(`"server.acl_conf" "${conf}" not exist`);
+        }
+      }
+    }
+
     // mux
     if (server.mux !== undefined) {
       if (typeof server.mux !== 'boolean') {
@@ -307,7 +425,7 @@ export class Config {
 
     // presets[].parameters
     for (const preset of server.presets) {
-      const {name, params} = preset;
+      const { name, params } = preset;
       if (typeof name !== 'string') {
         throw Error('"server.presets[].name" must be a string');
       }
@@ -318,6 +436,8 @@ export class Config {
         if (!isPlainObject(params)) {
           throw Error('"server.presets[].params" must be an plain object');
         }
+        const clazz = getPresetClassByName(name);
+        clazz.onCheckParams(params);
       }
     }
   }
@@ -325,7 +445,7 @@ export class Config {
   static _testCommon(common) {
     // timeout
     if (common.timeout !== undefined) {
-      const {timeout} = common;
+      const { timeout } = common;
       if (typeof timeout !== 'number') {
         throw Error('"timeout" must be a number');
       }
@@ -354,7 +474,7 @@ export class Config {
 
     // log_max_days
     if (common.log_max_days !== undefined) {
-      const {log_max_days} = common;
+      const { log_max_days } = common;
       if (typeof log_max_days !== 'number') {
         throw Error('"log_max_days" must a number');
       }
@@ -363,23 +483,9 @@ export class Config {
       }
     }
 
-    // workers
-    if (common.workers !== undefined) {
-      const {workers} = common;
-      if (typeof workers !== 'number') {
-        throw Error('"workers" must be a number');
-      }
-      if (workers < 0) {
-        throw Error('"workers" must be an integer');
-      }
-      if (workers > os.cpus().length) {
-        console.warn(`[config] "workers" is greater than the number of CPUs, is ${workers} workers expected?`);
-      }
-    }
-
     // dns
     if (common.dns !== undefined) {
-      const {dns} = common;
+      const { dns } = common;
       if (!Array.isArray(dns)) {
         throw Error('"dns" must be an array');
       }
@@ -392,7 +498,7 @@ export class Config {
 
     // dns_expire
     if (common.dns_expire !== undefined) {
-      const {dns_expire} = common;
+      const { dns_expire } = common;
       if (typeof dns_expire !== 'number') {
         throw Error('"dns_expire" must be a number');
       }

@@ -1,7 +1,26 @@
 language: node_js
 
 node_js:
-  - "6"
+  - "lts/*"
+
+before_deploy:
+  - export NEXT_VERSION=3.0.1
+  - export COMMIT_HASH=$(git log --format=%h -1)
+  - export DIST_PATH=build
+  - export PUBLISH_REPO=blinksocks/blinksocks-nightly-releases
+  - git clone https://github.com/${PUBLISH_REPO}.git ${DIST_PATH}
+  - yarn version --new-version "${NEXT_VERSION}-${COMMIT_HASH}" --no-git-tag-version
+  - yarn compile
+  - yarn pack --filename "${DIST_PATH}/v${NEXT_VERSION}-$(date +'%Y%m%d%H%M%S')-${COMMIT_HASH}.tgz"
+
+deploy:
+  provider: pages
+  local-dir: ${DIST_PATH}
+  skip_cleanup: true
+  keep-history: true
+  github-token: ${GITHUB_TOKEN}
+  repo: ${PUBLISH_REPO}
+  target-branch: master
 
 after_success:
   - bash <(curl -s https://codecov.io/bash)

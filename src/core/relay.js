@@ -1,8 +1,9 @@
 import EventEmitter from 'events';
-import {Pipe} from './pipe';
-import {DNSCache} from './dns-cache';
-import {PIPE_ENCODE, PIPE_DECODE} from '../constants';
-import {logger} from '../utils';
+import { ACL } from './acl';
+import { Pipe } from './pipe';
+import { Tracker } from './tracker';
+import { logger } from '../utils';
+import { PIPE_ENCODE, PIPE_DECODE } from '../constants';
 
 import {
   TcpInbound, TcpOutbound,
@@ -14,11 +15,11 @@ import {
 
 import {
   CONNECT_TO_REMOTE,
-  CONNECTION_CREATED,
   CONNECTION_CLOSED,
   CONNECTION_WILL_CLOSE,
   CHANGE_PRESET_SUITE,
-} from '../presets/defs';
+  PRESET_FAILED,
+} from '../presets/actions';
 
 /**
  * [client side]
@@ -36,6 +37,12 @@ export class Relay extends EventEmitter {
   static idcounter = 0;
 
   _id = null;
+
+  _config = null;
+
+  _acl = null;
+
+  _tracker = null;
 
   _ctx = null;
 
@@ -64,28 +71,26 @@ export class Relay extends EventEmitter {
     this._ctx.cid = id;
   }
 
-  constructor({transport, context, presets = []}) {
+  constructor({ config, transport, context, presets = [] }) {
     super();
-    this.updatePresets = this.updatePresets.bind(this);
-    this.onBroadcast = this.onBroadcast.bind(this);
-    this.onEncoded = this.onEncoded.bind(this);
-    this.onDecoded = this.onDecoded.bind(this);
     this._id = Relay.idcounter++;
+    this._config = config;
     this._transport = transport;
     this._remoteInfo = context.remoteInfo;
     // pipe
     this._presets = this.preparePresets(presets);
     this._pipe = this.createPipe(this._presets);
+    // ctx
     this._ctx = {
       pipe: this._pipe,
-      dnsCache: new DNSCache({expire: __DNS_EXPIRE__}),
       thisRelay: this,
       ...context,
     };
     // bounds
-    const {Inbound, Outbound} = this.getBounds(transport);
-    const inbound = new Inbound({context: this._ctx});
-    const outbound = new Outbound({context: this._ctx});
+    const { Inbound, Outbound } = this.getBounds(transport);
+    const props = { config, context: this._ctx };
+    const inbound = new Inbound(props);
+    const outbound = new Outbound(props);
     this._inbound = inbound;
     this._outbound = outbound;
     // outbound
@@ -96,19 +101,19 @@ export class Relay extends EventEmitter {
     this._inbound.setOutbound(this._outbound);
     this._inbound.on('close', () => this.onBoundClose(inbound, outbound));
     this._inbound.on('updatePresets', this.updatePresets);
+    // acl
+    if (config.acl) {
+      this._acl = new ACL({ remoteInfo: this._remoteInfo, rules: config.acl_rules });
+      this._acl.on('action', this.onBroadcast.bind(this));
+    }
+    // tracker
+    this._tracker = new Tracker({ config, transport, remoteInfo: this._remoteInfo });
   }
 
-  init({proxyRequest}) {
+  init({ proxyRequest }) {
     this._proxyRequest = proxyRequest;
-    this._pipe.broadcast('pipe', {
-      type: CONNECTION_CREATED,
-      payload: {transport: this._transport, ...this._remoteInfo}
-    });
     if (proxyRequest) {
-      this._pipe.broadcast(null, {
-        type: CONNECT_TO_REMOTE,
-        payload: proxyRequest
-      });
+      this._pipe.broadcast(null, { type: CONNECT_TO_REMOTE, payload: proxyRequest });
     }
   }
 
@@ -129,21 +134,21 @@ export class Relay extends EventEmitter {
     if (transport === 'udp') {
       [Inbound, Outbound] = [UdpInbound, UdpOutbound];
     } else {
-      [Inbound, Outbound] = __IS_CLIENT__ ? [TcpInbound, mapping[transport][1]] : [mapping[transport][0], TcpOutbound];
+      [Inbound, Outbound] = this._config.is_client ? [TcpInbound, mapping[transport][1]] : [mapping[transport][0], TcpOutbound];
     }
-    return {Inbound, Outbound};
+    return { Inbound, Outbound };
   }
 
   onBoundClose(thisBound, anotherBound) {
     if (anotherBound.__closed) {
       if (this._pipe && !this._pipe.destroyed) {
-        this._pipe.broadcast('pipe', {type: CONNECTION_CLOSED, payload: this._remoteInfo});
+        this._pipe.broadcast('pipe', { type: CONNECTION_CLOSED, payload: this._remoteInfo });
       }
       this.destroy();
       this.emit('close');
     } else {
       if (!this._pipe.destroyed) {
-        this._pipe.broadcast('pipe', {type: CONNECTION_WILL_CLOSE, payload: this._remoteInfo});
+        this._pipe.broadcast('pipe', { type: CONNECTION_WILL_CLOSE, payload: this._remoteInfo });
       }
       thisBound.__closed = true;
     }
@@ -159,23 +164,35 @@ export class Relay extends EventEmitter {
     return this._inbound;
   }
 
-  getContext() {
-    return this._ctx;
-  }
-
   // hooks of pipe
 
   onBroadcast(action) {
-    const type = action.type;
-    if (__MUX__ && this._transport !== 'udp') {
-      if (__IS_CLIENT__ && type === CONNECT_TO_REMOTE) {
-        const remote = `${this._remoteInfo.host}:${this._remoteInfo.port}`;
-        const target = `${action.payload.host}:${action.payload.port}`;
-        logger.info(`[relay] [${remote}] request over mux(id=${this._ctx.muxRelay.id}): ${target}`);
+    if (action.type === CONNECT_TO_REMOTE) {
+      const { host: sourceHost, port: sourcePort } = this._remoteInfo;
+      const { host: targetHost, port: targetPort } = action.payload;
+      const remote = `${sourceHost}:${sourcePort}`;
+      const target = `${targetHost}:${targetPort}`;
+      // tracker
+      if (this._tracker) {
+        this._tracker.setTargetAddress(targetHost, targetPort);
+      }
+      // acl
+      if (this._acl && this._acl.setTargetAddress(targetHost, targetPort)) {
+        return;
+      }
+      // mux
+      if (this._config.mux && this._config.is_client && this._transport !== 'udp') {
+        logger.info(`[relay-${this.id}] [${remote}] request over mux-${this._ctx.muxRelay.id}: ${target}`);
+        return;
+      }
+      logger.info(`[relay] [${remote}] request: ${target}`);
+    }
+    if (action.type === PRESET_FAILED) {
+      if (this._acl && this._acl.checkFailTimes(this._config.acl_tries)) {
         return;
       }
     }
-    if (type === CHANGE_PRESET_SUITE) {
+    if (action.type === CHANGE_PRESET_SUITE) {
       this.onChangePresetSuite(action);
       return;
     }
@@ -183,46 +200,59 @@ export class Relay extends EventEmitter {
     this._outbound && this._outbound.onBroadcast(action);
   }
 
-  onChangePresetSuite(action) {
-    const {type, suite, data} = action.payload;
+  onChangePresetSuite = (action) => {
+    const { type, suite, data } = action.payload;
     logger.verbose(`[relay] changing presets suite to: ${JSON.stringify(suite)}`);
     // 1. update preset list
     this.updatePresets(this.preparePresets([
       ...suite.presets,
-      {'name': 'auto-conf'}
+      { 'name': 'auto-conf' }
     ]));
     // 2. initialize newly created presets
-    const transport = this._transport;
     const proxyRequest = this._proxyRequest;
-    this._pipe.broadcast('pipe', {
-      type: CONNECTION_CREATED,
-      payload: {transport, ...this._remoteInfo}
-    });
-    if (__IS_CLIENT__) {
+    if (this._config.is_client) {
       this._pipe.broadcast(null, {
         type: CONNECT_TO_REMOTE,
-        payload: {...proxyRequest, keepAlive: true} // keep previous connection alive, don't re-connect
+        payload: { ...proxyRequest, keepAlive: true }, // keep previous connection alive, don't re-connect
       });
     }
     // 3. re-pipe
     this._pipe.feed(type, data);
-  }
+  };
 
-  onEncoded(buffer) {
-    if (__IS_CLIENT__) {
+  onPreDecode = (buffer, cb) => {
+    if (this._tracker !== null) {
+      this._tracker.trace(PIPE_DECODE, buffer.length);
+    }
+    if (this._config.is_server) {
+      if (this._acl) {
+        this._acl.collect(PIPE_DECODE, buffer.length);
+      }
+    }
+    cb(buffer);
+  };
+
+  onEncoded = (buffer) => {
+    if (this._tracker !== null) {
+      this._tracker.trace(PIPE_ENCODE, buffer.length);
+    }
+    if (this._config.is_client) {
       this._outbound.write(buffer);
     } else {
+      if (this._acl !== null) {
+        this._acl.collect(PIPE_ENCODE, buffer.length);
+      }
       this._inbound.write(buffer);
     }
-  }
+  };
 
-  onDecoded(buffer) {
-    if (__IS_CLIENT__) {
+  onDecoded = (buffer) => {
+    if (this._config.is_client) {
       this._inbound.write(buffer);
     } else {
       this._outbound.write(buffer);
     }
-  }
+  };
 
   // methods
 
@@ -238,10 +268,6 @@ export class Relay extends EventEmitter {
     }
   }
 
-  hasListener(name) {
-    return this.listenerCount(name) > 0;
-  }
-
   isOutboundReady() {
     return this._outbound && this._outbound.writable;
   }
@@ -252,11 +278,6 @@ export class Relay extends EventEmitter {
    * @returns {[]}
    */
   preparePresets(presets) {
-    const last = presets[presets.length - 1];
-    // add at least one "tracker" preset to the list
-    if (!last || last.name !== 'tracker') {
-      presets = presets.concat([{'name': 'tracker'}]);
-    }
     return presets;
   }
 
@@ -264,17 +285,18 @@ export class Relay extends EventEmitter {
    * update presets of pipe
    * @param value
    */
-  updatePresets(value) {
+  updatePresets = (value) => {
     this._presets = typeof value === 'function' ? value(this._presets) : value;
-    this._pipe.updateMiddlewares(this._presets);
-  }
+    this._pipe.updatePresets(this._presets);
+  };
 
   /**
    * create pipes for both data forward and backward
    */
   createPipe(presets) {
-    const pipe = new Pipe({presets, isUdp: this._transport === 'udp'});
+    const pipe = new Pipe({ config: this._config, presets, isUdp: this._transport === 'udp' });
     pipe.on('broadcast', this.onBroadcast.bind(this)); // if no action were caught by presets
+    pipe.on(`pre_${PIPE_DECODE}`, this.onPreDecode);
     pipe.on(`post_${PIPE_ENCODE}`, this.onEncoded);
     pipe.on(`post_${PIPE_DECODE}`, this.onDecoded);
     return pipe;
@@ -288,6 +310,10 @@ export class Relay extends EventEmitter {
       this._pipe && this._pipe.destroy();
       this._inbound && this._inbound.close();
       this._outbound && this._outbound.close();
+      this._tracker && this._tracker.destroy();
+      this._acl && this._acl.destroy();
+      this._tracker = null;
+      this._acl = null;
       this._ctx = null;
       this._pipe = null;
       this._inbound = null;

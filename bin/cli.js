@@ -71,7 +71,7 @@ function main() {
   if (options[0] === 'init') {
     const isMinimal = hasOption('-m') || hasOption('--minimal');
     const isOverwrite = hasOption('-w') || hasOption('--write');
-    return init({isMinimal, isOverwrite});
+    return init({ isMinimal, isOverwrite });
   }
 
   // parse options
@@ -101,7 +101,7 @@ function main() {
   }
 
   if (hasOption('--list-presets')) {
-    const {presets, legacyPresets} = modules;
+    const { presets, legacyPresets } = modules;
     console.log(chalk.bold.underline('[Built-In]'));
     console.log(presets.join(os.EOL));
     console.log('');
@@ -114,11 +114,4 @@ function main() {
   console.log(usage);
 }
 
-// libsodium-wrappers need to be loaded asynchronously
-// so we must wait for it ready before run main().
-// https://github.com/jedisct1/libsodium.js#usage-as-a-module
-const _sodium = require('libsodium-wrappers');
-_sodium.ready
-  // a handy way to access libsodium without fighting with Promise
-  .then(() => global.libsodium = _sodium)
-  .then(main);
+main();

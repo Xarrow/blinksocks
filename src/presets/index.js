@@ -1,9 +1,4 @@
-import {checkPresetClass} from './defs';
-
 // functional
-import StatsPreset from './stats';
-import TrackerPreset from './tracker';
-import AccessControlPreset from './access-control';
 import AutoConfPreset from './auto-conf';
 import MuxPreset from './mux';
 
@@ -32,33 +27,8 @@ import ObfsTls12TicketPreset from './obfs-tls1.2-ticket';
 // others
 import AeadRandomCipherPreset from './aead-random-cipher';
 
-function monkeyPatch(clazz) {
-  // patch onInit()
-  clazz.onInit = (function (onInit) {
-    return function _onInit(...args) {
-      if (!clazz.initialized) {
-        onInit(...args);
-        clazz.initialized = true;
-      }
-    };
-  })(clazz.onInit);
-
-  // patch checkParams()
-  clazz.checkParams = (function (checkParams) {
-    return function _checkParams(...args) {
-      if (!clazz.checked) {
-        checkParams(...args);
-        clazz.checked = true;
-      }
-    };
-  })(clazz.checkParams);
-}
-
-const mapping = {
+const presetMap = {
   // functional
-  'stats': StatsPreset,
-  'tracker': TrackerPreset,
-  'access-control': AccessControlPreset,
   'auto-conf': AutoConfPreset,
   'mux': MuxPreset,
 
@@ -88,17 +58,38 @@ const mapping = {
   'aead-random-cipher': AeadRandomCipherPreset
 };
 
-const presetClasses = {...mapping};
-
-Object.keys(presetClasses).forEach((clazzName) => monkeyPatch(presetClasses[clazzName]));
+/**
+ * check if a class is a valid preset class
+ * @param clazz
+ * @returns {boolean}
+ */
+function checkPresetClass(clazz) {
+  if (typeof clazz !== 'function') {
+    return false;
+  }
+  // check require hooks
+  const requiredMethods = [
+    'onNotified', 'onDestroy', 'onInit',
+    'beforeOut', 'beforeIn', 'clientOut', 'serverIn', 'serverOut', 'clientIn',
+    'beforeOutUdp', 'beforeInUdp', 'clientOutUdp', 'serverInUdp', 'serverOutUdp', 'clientInUdp'
+  ];
+  if (requiredMethods.some((method) => typeof clazz.prototype[method] !== 'function')) {
+    return false;
+  }
+  const requiredStaticMethods = ['onCheckParams', 'onCache'];
+  if (requiredStaticMethods.some((method) => typeof clazz[method] !== 'function')) {
+    return false;
+  }
+  return true;
+}
 
 export function getPresetClassByName(name) {
-  let clazz = presetClasses[name];
+  let clazz = presetMap[name];
   if (clazz === undefined) {
     try {
       clazz = require(name);
     } catch (err) {
-      throw Error(`cannot load preset: "${name}" from built-in modules or external`);
+      throw Error(`cannot load preset "${name}" from built-in modules or external`);
     }
     if (!checkPresetClass(clazz)) {
       throw Error(`definition of preset "${name}" is invalid`);
@@ -107,5 +98,4 @@ export function getPresetClassByName(name) {
   return clazz;
 }
 
-export const presets = Object.keys(mapping);
-export * from './defs';
+export const presets = Object.keys(presetMap);
